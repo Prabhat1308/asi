@@ -224,8 +224,14 @@ class OffPolicyTDLinearLearner:
         rho_t = pi(a_t|s_t) / b(a_t|s_t)               (provided externally)
         rho_clipped = min(c, rho_t)                     (Retrace clipping)
         delta_t = R_{t+1} + gamma_t * V(s_{t+1}) - V(s_t)
-        e_t = gamma_t * lambda_t * rho_clipped * e_{t-1} + phi_t
-        w_{t+1} = w_t + alpha * delta_t * rho_clipped * e_t
+        e_t = rho_clipped * (gamma_t * lambda_t * e_{t-1} + phi_t)
+        w_{t+1} = w_t + alpha * delta_t * e_t
+
+    Each decision's ratio enters the trace exactly once, so the term carried
+    from step ``t-k`` is weighted by ``rho_t ... rho_{t-k}`` (with clipping),
+    matching per-decision importance sampling and the trace convention used
+    by ``GradientTDLinearLearner``, ``OffPolicyHordeLearner`` and
+    ``StackedLinearHorde`` in this framework.
 
     Setting ``retrace_clip = inf`` recovers naive per-decision IS.
     Setting ``retrace_clip = 1.0`` gives the Retrace-c=1 update which is
@@ -335,13 +341,15 @@ class OffPolicyTDLinearLearner:
         v_next = jnp.dot(state.weights, next_observation) + state.bias
         td_error = reward_s + _skip_zero_scale(gamma_s, v_next) - v_t
 
-        # IS-weighted accumulating eligibility trace
-        decay = gamma_s * lam * rho_clipped
-        new_e = _skip_zero_scale(decay, state.eligibility_traces) + observation
-        new_e_b = _skip_zero_scale(decay, state.bias_eligibility_trace) + 1.0
+        # Per-decision IS accumulating trace: each decision's ratio enters the
+        # trace exactly once, z_t = rho_t (gamma lambda z_{t-1} + phi_t), and
+        # the update is delta_t z_t (Precup, Sutton & Singh 2000).
+        decay = gamma_s * lam
+        new_e = rho_clipped * (_skip_zero_scale(decay, state.eligibility_traces) + observation)
+        new_e_b = rho_clipped * (_skip_zero_scale(decay, state.bias_eligibility_trace) + 1.0)
 
-        # Update with rho_clipped * delta * e
-        scaled_update = alpha * rho_clipped * td_error
+        # Update with delta * e (rho already inside the trace)
+        scaled_update = alpha * td_error
         proposed_state = OffPolicyTDState(  # type: ignore[call-arg]
             weights=state.weights + scaled_update * new_e,
             bias=state.bias + scaled_update * new_e_b,

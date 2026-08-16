@@ -302,6 +302,77 @@ class TestGradientTD:
 # =============================================================================
 
 
+class TestPerDecisionTrace:
+    def test_trace_applies_each_decision_ratio_exactly_once(self) -> None:
+        """z_t = rho_t (gamma lambda z_{t-1} + phi_t), w += alpha delta_t z_t (Precup et al. 2000).
+
+        The old recursion put rho_t on the carried trace *and* on the update, so
+        phi_{t-1} was weighted by rho_t**2 instead of rho_t * rho_{t-1}; the two agree
+        only for constant rho, which is all the earlier tests exercised.
+        """
+        alpha, lam, gamma = 0.1, 0.8, 0.9
+        learner = OffPolicyTDLinearLearner(
+            step_size=alpha, trace_decay=lam, retrace_clip=float("inf")
+        )
+        state = learner.init(3)
+        rng = np.random.default_rng(3)
+        obs = rng.normal(size=(9, 3)).astype(np.float32)
+        rewards = rng.normal(size=(8,)).astype(np.float32)
+        rhos = np.array([1.262, 2.94, 1.852, 1.894, 1.986, 2.094, 0.622, 1.433], dtype=np.float32)
+
+        w = np.zeros(3, dtype=np.float64)
+        b = 0.0
+        z = np.zeros(3, dtype=np.float64)
+        z_b = 0.0
+        for t in range(8):
+            phi, phi_next = obs[t].astype(np.float64), obs[t + 1].astype(np.float64)
+            delta = rewards[t] + gamma * (w @ phi_next + b) - (w @ phi + b)
+            z = rhos[t] * (gamma * lam * z + phi)
+            z_b = rhos[t] * (gamma * lam * z_b + 1.0)
+            w = w + alpha * delta * z
+            b = b + alpha * delta * z_b
+            result = learner.update(
+                state,
+                jnp.asarray(obs[t]),
+                jnp.float32(rewards[t]),
+                jnp.asarray(obs[t + 1]),
+                jnp.float32(gamma),
+                jnp.float32(rhos[t]),
+            )
+            state = result.state
+        chex.assert_trees_all_close(state.weights, jnp.asarray(w, dtype=jnp.float32), rtol=1e-4)
+        assert float(state.bias) == pytest.approx(b, rel=1e-4)
+
+    def test_constant_rho_matches_previous_convention(self) -> None:
+        """With constant rho the canonical and old recursions coincide (pins no regression)."""
+        alpha, lam, gamma, rho = 0.1, 0.8, 0.9, 2.0
+        learner = OffPolicyTDLinearLearner(
+            step_size=alpha, trace_decay=lam, retrace_clip=float("inf")
+        )
+        state = learner.init(2)
+        w = np.zeros(2)
+        b = 0.0
+        e = np.zeros(2)
+        e_b = 0.0
+        obs = np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [0.5, -0.5]])
+        for t in range(3):
+            phi, phi_next = obs[t], obs[t + 1]
+            delta = 1.0 + gamma * (w @ phi_next + b) - (w @ phi + b)
+            e = gamma * lam * rho * e + phi
+            e_b = gamma * lam * rho * e_b + 1.0
+            w = w + alpha * rho * delta * e
+            b = b + alpha * rho * delta * e_b
+            state = learner.update(
+                state,
+                jnp.asarray(obs[t], dtype=jnp.float32),
+                jnp.float32(1.0),
+                jnp.asarray(obs[t + 1], dtype=jnp.float32),
+                jnp.float32(gamma),
+                jnp.float32(rho),
+            ).state
+        chex.assert_trees_all_close(state.weights, jnp.asarray(w, dtype=jnp.float32), rtol=1e-4)
+
+
 class TestRetraceClip:
     def test_clip_at_one(self) -> None:
         learner = OffPolicyTDLinearLearner(retrace_clip=1.0)
